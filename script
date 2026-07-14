@@ -14,10 +14,11 @@ local CONFIG = { AttackInterval = 0.05 }
 local CachedTool = nil
 local AutoEnabled = false
 local lastAtk = 0
+local WeaponScript = nil  -- 缓存武器脚本对象
 
 local function GetTool()
     local c = LP.Character
-    if not c then CachedTool = nil; return nil end
+    if not c then CachedTool = nil; WeaponScript = nil; return nil end
     if CachedTool and CachedTool.Parent == c and CachedTool:FindFirstChild("WeaponRemoteEvent") then return CachedTool end
     local t = c:FindFirstChildOfClass("Tool")
     if t and t:FindFirstChild("WeaponRemoteEvent") then CachedTool = t; return t end
@@ -31,52 +32,73 @@ local function GetTool()
             end
         end
     end
-    CachedTool = nil; return nil
+    CachedTool = nil; WeaponScript = nil; return nil
 end
 
--- ★彻底修复冷却和子弹速度：通过getconnections拿到攻击函数，直接修改upvalue
+-- ★彻底修复：找到Handle下的LocalScript，直接用getscriptclosure获取闭包后修改环境
+local function FindWeaponScript(tool)
+    if not tool then return nil end
+    -- 缓存检查
+    if WeaponScript and WeaponScript.Parent and WeaponScript.Parent.Parent == tool then
+        return WeaponScript
+    end
+    local handle = tool:FindFirstChild("Handle")
+    if handle then
+        for _, child in ipairs(handle:GetChildren()) do
+            if child:IsA("LocalScript") then
+                WeaponScript = child
+                return child
+            end
+        end
+    end
+    WeaponScript = nil
+    return nil
+end
+
+-- ★核心：直接修改脚本环境中的变量
 local function InstantBullet(tool)
     if not tool then return end
-
-    -- 1. 修改属性（对新生成的武器有效）
+    
+    -- 修改属性（对新武器有效）
     local handle = tool:FindFirstChild("Handle")
     if handle then
         pcall(function() handle:SetAttribute("BulletSpeed", 100000) end)
         pcall(function() handle:SetAttribute("BulletRange", 10000) end)
-        pcall(function() handle:SetAttribute("BulletLife", 10) end)
         pcall(function() handle:SetAttribute("BaseCooldown", 0.01) end)
     end
-
-    -- 2. ★通过getconnections拿到Activated事件的回调函数
-    local cons = getconnections and getconnections(tool.Activated)
-    if cons then
-        for _, conn in ipairs(cons) do
-            local func = conn.Function
-            if func then
-                local ok, upvals = pcall(getupvalues, func)
-                if ok and upvals then
-                    for i, uv in ipairs(upvals) do
-                        if type(uv) == "number" then
-                            -- v_u_7 BaseCooldown（默认1，范围0-10）→ 设为0
-                            if uv > 0 and uv <= 5 then
-                                pcall(setupvalue, func, i, 0)
-                            -- v_u_12 BulletSpeed（默认200，范围100-1000）→ 设为100000
-                            elseif uv > 50 and uv <= 1000 then
-                                pcall(setupvalue, func, i, 100000)
-                            -- v_u_14 BulletLife（默认5，范围0-10）→ 设为10
-                            elseif uv > 4 and uv <= 6 then
-                                pcall(setupvalue, func, i, 10)
-                            end
-                        end
-                    end
+    
+    -- 找到LocalScript
+    local script = FindWeaponScript(tool)
+    if not script then return end
+    
+    -- 方法A：通过getscriptclosure获取闭包，再getfenv获取环境
+    local ok, closure = pcall(getscriptclosure, script)
+    if ok and closure then
+        local ok2, env = pcall(getfenv, closure)
+        if ok2 and env then
+            -- 直接修改环境变量
+            env.v_u_10 = 0              -- 冷却计时器
+            env.v_u_7 = 0               -- BaseCooldown
+            env.v_u_12 = 100000         -- BulletSpeed
+            env.v_u_13 = 10000          -- BulletRange
+            env.v_u_14 = 10             -- BulletLife
+            return
+        end
+    end
+    
+    -- 方法B：用getupvalues遍历脚本闭包
+    local ok3, upvals = pcall(getupvalues, script)
+    if ok3 and upvals then
+        for i, uv in ipairs(upvals) do
+            if type(uv) == "number" then
+                if uv > 0 and uv <= 5 then
+                    pcall(setupvalue, script, i, 0)
+                elseif uv > 50 and uv <= 5000 then
+                    pcall(setupvalue, script, i, 100000)
                 end
             end
         end
     end
-
-    -- 3. ★直接修改v_u_10冷却计时器：通过getupvalues找到它并设为0
-    -- 但刚刚已经通过修改v_u_7为0解决冷却问题了（v_u_10 = tick() + 0 = tick()）
-    -- tick() < tick() 永远为false，所以冷却解除
 end
 
 -- 寻找最近的Hittable敌人
@@ -109,10 +131,10 @@ local function DoAttack()
     if now - lastAtk < CONFIG.AttackInterval then return end
     lastAtk = now
 
-    -- ★每次攻击前强制修改子弹参数和冷却
+    -- 修改子弹和冷却
     InstantBullet(tool)
 
-    -- 直接发射子弹到目标位置
+    -- 找目标并发射
     local target, targetPos = FindEnemy()
     local remoteEv = tool:FindFirstChild("WeaponRemoteEvent")
     if not remoteEv then return end
@@ -120,12 +142,13 @@ local function DoAttack()
     local c = LP.Character
     local r = c and c:FindFirstChild("HumanoidRootPart")
 
-    if targetPos and r then
+    if targetPos then
         pcall(function() remoteEv:FireServer(targetPos) end)
     elseif r then
         pcall(function() remoteEv:FireServer(r.Position + r.CFrame.LookVector * 100) end)
     end
 
+    -- 触发原生攻击（此时冷却已被解除）
     pcall(function() tool:Activate() end)
 end
 
