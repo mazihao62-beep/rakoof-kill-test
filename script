@@ -14,7 +14,7 @@ local CONFIG = { AttackInterval = 0.05 }
 local CachedTool = nil
 local AutoEnabled = false
 local lastAtk = 0
-local WeaponScript = nil  -- 缓存武器脚本对象
+local WeaponScript = nil
 
 local function GetTool()
     local c = LP.Character
@@ -35,73 +35,53 @@ local function GetTool()
     CachedTool = nil; WeaponScript = nil; return nil
 end
 
--- ★彻底修复：找到Handle下的LocalScript，直接用getscriptclosure获取闭包后修改环境
+-- 找到武器脚本
 local function FindWeaponScript(tool)
     if not tool then return nil end
-    -- 缓存检查
-    if WeaponScript and WeaponScript.Parent and WeaponScript.Parent.Parent == tool then
-        return WeaponScript
-    end
+    if WeaponScript and WeaponScript.Parent and WeaponScript.Parent.Parent == tool then return WeaponScript end
     local handle = tool:FindFirstChild("Handle")
     if handle then
         for _, child in ipairs(handle:GetChildren()) do
-            if child:IsA("LocalScript") then
-                WeaponScript = child
-                return child
-            end
+            if child:IsA("LocalScript") then WeaponScript = child; return child end
         end
     end
-    WeaponScript = nil
-    return nil
+    WeaponScript = nil; return nil
 end
 
--- ★核心：直接修改脚本环境中的变量
+-- 修改子弹参数
 local function InstantBullet(tool)
     if not tool then return end
-    
-    -- 修改属性（对新武器有效）
     local handle = tool:FindFirstChild("Handle")
     if handle then
         pcall(function() handle:SetAttribute("BulletSpeed", 100000) end)
         pcall(function() handle:SetAttribute("BulletRange", 10000) end)
         pcall(function() handle:SetAttribute("BaseCooldown", 0.01) end)
     end
-    
-    -- 找到LocalScript
     local script = FindWeaponScript(tool)
     if not script then return end
-    
-    -- 方法A：通过getscriptclosure获取闭包，再getfenv获取环境
     local ok, closure = pcall(getscriptclosure, script)
     if ok and closure then
         local ok2, env = pcall(getfenv, closure)
         if ok2 and env then
-            -- 直接修改环境变量
-            env.v_u_10 = 0              -- 冷却计时器
-            env.v_u_7 = 0               -- BaseCooldown
-            env.v_u_12 = 100000         -- BulletSpeed
-            env.v_u_13 = 10000          -- BulletRange
-            env.v_u_14 = 10             -- BulletLife
-            return
+            env.v_u_10 = 0
+            env.v_u_7 = 0
+            env.v_u_12 = 100000
+            env.v_u_13 = 10000
         end
     end
-    
-    -- 方法B：用getupvalues遍历脚本闭包
     local ok3, upvals = pcall(getupvalues, script)
     if ok3 and upvals then
         for i, uv in ipairs(upvals) do
             if type(uv) == "number" then
-                if uv > 0 and uv <= 5 then
-                    pcall(setupvalue, script, i, 0)
-                elseif uv > 50 and uv <= 5000 then
-                    pcall(setupvalue, script, i, 100000)
-                end
+                if uv > 0 and uv <= 5 then pcall(setupvalue, script, i, 0)
+                elseif uv > 50 and uv <= 5000 then pcall(setupvalue, script, i, 100000) end
             end
         end
     end
 end
 
--- 寻找最近的Hittable敌人
+-- ★调试版：打印找到的目标
+local debugCount = 0
 local function FindEnemy()
     local c = LP.Character
     if not c then return nil, nil end
@@ -109,9 +89,12 @@ local function FindEnemy()
     if not r then return nil, nil end
     local pos = r.Position
     local bestPart, bestPos, bestD = nil, nil, math.huge
+    local found = 0
     for _, o in ipairs(Workspace:GetDescendants()) do
         if o:IsA("Script") or o:IsA("LocalScript") then continue end
-        if o:GetAttribute("Hittable") then
+        local hittable = o:GetAttribute("Hittable")
+        if hittable then
+            found = found + 1
             local p = o:IsA("BasePart") and o or (o:IsA("Model") and o.PrimaryPart)
             if p then
                 local d = (p.Position - pos).Magnitude
@@ -121,34 +104,44 @@ local function FindEnemy()
             end
         end
     end
+    -- 每3秒打印一次调试信息
+    debugCount = debugCount + 1
+    if debugCount % 180 == 0 then
+        print("[RKT 调试] 找到 Hittable 对象数量:", found)
+        print("[RKT 调试] 最佳目标:", bestPart and bestPart:GetFullName() or "无")
+        print("[RKT 调试] 最佳距离:", bestD)
+    end
     return bestPart, bestPos
 end
 
 local function DoAttack()
     local tool = GetTool()
-    if not tool then return end
+    if not tool then
+        if debugCount % 180 == 0 then print("[RKT 调试] 未装备远程武器") end
+        return end
     local now = tick()
     if now - lastAtk < CONFIG.AttackInterval then return end
     lastAtk = now
 
-    -- 修改子弹和冷却
     InstantBullet(tool)
 
-    -- 找目标并发射
     local target, targetPos = FindEnemy()
     local remoteEv = tool:FindFirstChild("WeaponRemoteEvent")
-    if not remoteEv then return end
+    if not remoteEv then
+        if debugCount % 180 == 0 then print("[RKT 调试] 武器没有 WeaponRemoteEvent") end
+        return end
 
     local c = LP.Character
     local r = c and c:FindFirstChild("HumanoidRootPart")
 
     if targetPos then
         pcall(function() remoteEv:FireServer(targetPos) end)
+        if debugCount % 180 == 0 then print("[RKT 调试] 发射子弹到:", targetPos) end
     elseif r then
         pcall(function() remoteEv:FireServer(r.Position + r.CFrame.LookVector * 100) end)
+        if debugCount % 180 == 0 then print("[RKT 调试] 无目标，朝前方发射") end
     end
 
-    -- 触发原生攻击（此时冷却已被解除）
     pcall(function() tool:Activate() end)
 end
 
@@ -385,7 +378,7 @@ end
 
 -- ===== 启动 =====
 createUI()
-customNotify("Rakoof Kill Test", "子弹瞬间命中 | 作者:英吉利超入", 3)
+customNotify("Rakoof Kill Test", "调试模式 | 查看控制台输出 | 作者:英吉利超入", 3)
 
 RunService.Heartbeat:Connect(function()
     if AutoEnabled then pcall(DoAttack) end
