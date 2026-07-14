@@ -1,0 +1,375 @@
+--rakoof kill test 脚本
+--作者:B站英吉利超入
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+local CoreGui = game:GetService("CoreGui")
+local LP = Players.LocalPlayer
+
+-- ===== 核心配置 =====
+local CONFIG = { AttackInterval = 0.05 }
+local CachedTool = nil
+local AutoEnabled = false
+local lastAtk = 0
+
+local function GetTool()
+    local c = LP.Character
+    if not c then CachedTool = nil; return nil end
+    if CachedTool and CachedTool.Parent == c and CachedTool:FindFirstChild("WeaponRemoteEvent") then return CachedTool end
+    local t = c:FindFirstChildOfClass("Tool")
+    if t and t:FindFirstChild("WeaponRemoteEvent") then CachedTool = t; return t end
+    local bp = LP:FindFirstChild("Backpack")
+    if bp then
+        for _, v in ipairs(bp:GetChildren()) do
+            if v:IsA("Tool") and v:FindFirstChild("WeaponRemoteEvent") then
+                pcall(function() v.Parent = c end)
+                task.wait(0.1)
+                CachedTool = v; return v
+            end
+        end
+    end
+    CachedTool = nil; return nil
+end
+
+-- ★彻底修复冷却和子弹速度：通过getconnections拿到攻击函数，直接修改upvalue
+local function InstantBullet(tool)
+    if not tool then return end
+
+    -- 1. 修改属性（对新生成的武器有效）
+    local handle = tool:FindFirstChild("Handle")
+    if handle then
+        pcall(function() handle:SetAttribute("BulletSpeed", 100000) end)
+        pcall(function() handle:SetAttribute("BulletRange", 10000) end)
+        pcall(function() handle:SetAttribute("BulletLife", 10) end)
+        pcall(function() handle:SetAttribute("BaseCooldown", 0.01) end)
+    end
+
+    -- 2. ★通过getconnections拿到Activated事件的回调函数
+    local cons = getconnections and getconnections(tool.Activated)
+    if cons then
+        for _, conn in ipairs(cons) do
+            local func = conn.Function
+            if func then
+                local ok, upvals = pcall(getupvalues, func)
+                if ok and upvals then
+                    for i, uv in ipairs(upvals) do
+                        if type(uv) == "number" then
+                            -- v_u_7 BaseCooldown（默认1，范围0-10）→ 设为0
+                            if uv > 0 and uv <= 5 then
+                                pcall(setupvalue, func, i, 0)
+                            -- v_u_12 BulletSpeed（默认200，范围100-1000）→ 设为100000
+                            elseif uv > 50 and uv <= 1000 then
+                                pcall(setupvalue, func, i, 100000)
+                            -- v_u_14 BulletLife（默认5，范围0-10）→ 设为10
+                            elseif uv > 4 and uv <= 6 then
+                                pcall(setupvalue, func, i, 10)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- 3. ★直接修改v_u_10冷却计时器：通过getupvalues找到它并设为0
+    -- 但刚刚已经通过修改v_u_7为0解决冷却问题了（v_u_10 = tick() + 0 = tick()）
+    -- tick() < tick() 永远为false，所以冷却解除
+end
+
+-- 寻找最近的Hittable敌人
+local function FindEnemy()
+    local c = LP.Character
+    if not c then return nil, nil end
+    local r = c:FindFirstChild("HumanoidRootPart")
+    if not r then return nil, nil end
+    local pos = r.Position
+    local bestPart, bestPos, bestD = nil, nil, math.huge
+    for _, o in ipairs(Workspace:GetDescendants()) do
+        if o:IsA("Script") or o:IsA("LocalScript") then continue end
+        if o:GetAttribute("Hittable") then
+            local p = o:IsA("BasePart") and o or (o:IsA("Model") and o.PrimaryPart)
+            if p then
+                local d = (p.Position - pos).Magnitude
+                if d < 500 and d < bestD then
+                    bestD = d; bestPart = p; bestPos = p.Position
+                end
+            end
+        end
+    end
+    return bestPart, bestPos
+end
+
+local function DoAttack()
+    local tool = GetTool()
+    if not tool then return end
+    local now = tick()
+    if now - lastAtk < CONFIG.AttackInterval then return end
+    lastAtk = now
+
+    -- ★每次攻击前强制修改子弹参数和冷却
+    InstantBullet(tool)
+
+    -- 直接发射子弹到目标位置
+    local target, targetPos = FindEnemy()
+    local remoteEv = tool:FindFirstChild("WeaponRemoteEvent")
+    if not remoteEv then return end
+
+    local c = LP.Character
+    local r = c and c:FindFirstChild("HumanoidRootPart")
+
+    if targetPos and r then
+        pcall(function() remoteEv:FireServer(targetPos) end)
+    elseif r then
+        pcall(function() remoteEv:FireServer(r.Position + r.CFrame.LookVector * 100) end)
+    end
+
+    pcall(function() tool:Activate() end)
+end
+
+-- ===== 自定义通知 =====
+local function customNotify(title, text, duration)
+    duration = duration or 2
+    print("[RKT] " .. title .. (text ~= "" and " - " .. text or ""))
+    local notif = Instance.new("Frame")
+    notif.Size = UDim2.new(0, 220, 0, 60)
+    notif.Position = UDim2.new(1, -10, 1, -10)
+    notif.AnchorPoint = Vector2.new(1, 1)
+    notif.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    notif.BackgroundTransparency = 0.1
+    notif.BorderSizePixel = 0
+    notif.ZIndex = 100
+    notif.Parent = CoreGui
+    Instance.new("UICorner", notif).CornerRadius = UDim.new(0, 8)
+    local stroke = Instance.new("UIStroke", notif)
+    stroke.Thickness = 1.5
+    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    stroke.Color = Color3.fromRGB(100, 200, 100)
+    local titleLabel = Instance.new("TextLabel", notif)
+    titleLabel.Size = UDim2.new(1, -16, 0, 20)
+    titleLabel.Position = UDim2.new(0, 8, 0, 6)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.Font = Enum.Font.SourceSansBold
+    titleLabel.TextSize = 14
+    titleLabel.TextColor3 = Color3.new(1, 1, 1)
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    titleLabel.Text = title
+    titleLabel.ZIndex = 101
+    local contentLabel = Instance.new("TextLabel", notif)
+    contentLabel.Size = UDim2.new(1, -16, 0, 18)
+    contentLabel.Position = UDim2.new(0, 8, 0, 30)
+    contentLabel.BackgroundTransparency = 1
+    contentLabel.Font = Enum.Font.SourceSans
+    contentLabel.TextSize = 13
+    contentLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+    contentLabel.TextXAlignment = Enum.TextXAlignment.Left
+    contentLabel.Text = text
+    contentLabel.ZIndex = 101
+    notif.Position = UDim2.new(1, 240, 1, -10)
+    local inTween = TweenService:Create(notif, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Position = UDim2.new(1, -230, 1, -10) })
+    inTween:Play()
+    task.delay(duration, function()
+        local outTween = TweenService:Create(notif, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { Position = UDim2.new(1, 240, 1, -10) })
+        outTween:Play()
+        outTween.Completed:Wait()
+        notif:Destroy()
+    end)
+end
+
+-- ===== UI =====
+local function createUI()
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "RKTScriptUI"
+    screenGui.Parent = CoreGui
+
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Size = UDim2.new(0, 300, 0, 280)
+    mainFrame.Position = UDim2.new(0.5, -150, 0.4, -140)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    mainFrame.BackgroundTransparency = 0.05
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Active = true
+    mainFrame.Draggable = true
+    mainFrame.Parent = screenGui
+    Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 10)
+    local mainStroke = Instance.new("UIStroke", mainFrame)
+    mainStroke.Thickness = 2
+    mainStroke.Color = Color3.fromRGB(255, 100, 100)
+
+    local titleBar = Instance.new("Frame", mainFrame)
+    titleBar.Size = UDim2.new(1, 0, 0, 32)
+    titleBar.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+    titleBar.BorderSizePixel = 0
+    Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 10)
+    local titleLabel = Instance.new("TextLabel", titleBar)
+    titleLabel.Size = UDim2.new(1, -70, 1, 0)
+    titleLabel.Position = UDim2.new(0, 12, 0, 0)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.Font = Enum.Font.SourceSansBold
+    titleLabel.TextSize = 16
+    titleLabel.TextColor3 = Color3.new(1, 1, 1)
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    titleLabel.Text = "Rakoof Kill Test    作者:英吉利超入"
+    titleLabel.TextScaled = true
+
+    local minimizeBtn = Instance.new("TextButton", titleBar)
+    minimizeBtn.Size = UDim2.new(0, 24, 0, 24)
+    minimizeBtn.Position = UDim2.new(1, -56, 0, 4)
+    minimizeBtn.Text = "—"
+    minimizeBtn.Font = Enum.Font.SourceSansBold
+    minimizeBtn.TextSize = 14
+    minimizeBtn.TextColor3 = Color3.new(1, 1, 1)
+    minimizeBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+    minimizeBtn.BorderSizePixel = 0
+    Instance.new("UICorner", minimizeBtn).CornerRadius = UDim.new(0, 4)
+
+    local closeBtn = Instance.new("TextButton", titleBar)
+    closeBtn.Size = UDim2.new(0, 24, 0, 24)
+    closeBtn.Position = UDim2.new(1, -28, 0, 4)
+    closeBtn.Text = "✕"
+    closeBtn.Font = Enum.Font.SourceSansBold
+    closeBtn.TextSize = 14
+    closeBtn.TextColor3 = Color3.new(1, 1, 1)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(200, 80, 80)
+    closeBtn.BorderSizePixel = 0
+    Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 4)
+
+    local contentFrame = Instance.new("Frame", mainFrame)
+    contentFrame.Size = UDim2.new(1, -24, 1, -44)
+    contentFrame.Position = UDim2.new(0, 12, 0, 38)
+    contentFrame.BackgroundTransparency = 1
+    local listLayout = Instance.new("UIListLayout", contentFrame)
+    listLayout.Padding = UDim.new(0, 8)
+
+    local function createToggle(text, parent)
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(1, 0, 0, 42)
+        btn.Text = text
+        btn.BackgroundColor3 = Color3.fromRGB(60, 160, 60)
+        btn.TextColor3 = Color3.new(1, 1, 1)
+        btn.Font = Enum.Font.SourceSansBold
+        btn.TextSize = 18
+        btn.Parent = parent
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 10)
+        return btn
+    end
+
+    local function createSlider(title, min, max, default, parent)
+        local frame = Instance.new("Frame")
+        frame.Size = UDim2.new(1, 0, 0, 42)
+        frame.BackgroundTransparency = 1
+        frame.Parent = parent
+        local label = Instance.new("TextLabel")
+        label.Size = UDim2.new(1, 0, 0, 18)
+        label.BackgroundTransparency = 1
+        label.Font = Enum.Font.SourceSans
+        label.TextSize = 12
+        label.TextColor3 = Color3.new(1, 1, 1)
+        label.TextXAlignment = Enum.TextXAlignment.Left
+        label.Text = title .. ": " .. default
+        label.Parent = frame
+        local input = Instance.new("TextBox")
+        input.Size = UDim2.new(1, 0, 0, 20)
+        input.Position = UDim2.new(0, 0, 0, 20)
+        input.Text = tostring(default)
+        input.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+        input.TextColor3 = Color3.new(1,1,1)
+        input.Font = Enum.Font.SourceSans
+        input.TextSize = 12
+        input.Parent = frame
+        return {
+            GetValue = function() return tonumber(input.Text) or default end,
+            SetValue = function(val) input.Text = tostring(val); label.Text = title .. ": " .. val end,
+            Input = input
+        }
+    end
+
+    local autoToggle = createToggle("⚔ 自动攻击（关闭）", contentFrame)
+    autoToggle.MouseButton1Click:Connect(function()
+        AutoEnabled = not AutoEnabled
+        if AutoEnabled then
+            autoToggle.Text = "⚔ 自动攻击（开启 " .. CONFIG.AttackInterval .. "s）"
+            autoToggle.BackgroundColor3 = Color3.fromRGB(60, 160, 60)
+        else
+            autoToggle.Text = "⚔ 自动攻击（关闭）"
+            autoToggle.BackgroundColor3 = Color3.fromRGB(120, 60, 60)
+        end
+    end)
+
+    local intervalSlider = createSlider("攻击间隔(秒)", 0.01, 0.5, CONFIG.AttackInterval, contentFrame)
+    intervalSlider.Input.FocusLost:Connect(function()
+        local v = math.clamp(tonumber(intervalSlider.Input.Text) or CONFIG.AttackInterval, 0.01, 0.5)
+        CONFIG.AttackInterval = v; intervalSlider.SetValue(v)
+        if AutoEnabled then autoToggle.Text = "⚔ 自动攻击（开启 " .. v .. "s）" end
+    end)
+
+    -- 悬浮窗
+    local floatFrame = Instance.new("TextButton", screenGui)
+    floatFrame.Size = UDim2.new(0, 200, 0, 30)
+    floatFrame.Position = UDim2.new(0.5, -100, 0, 10)
+    floatFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+    floatFrame.BackgroundTransparency = 0.1
+    floatFrame.BorderSizePixel = 0
+    floatFrame.Visible = false
+    floatFrame.Active = true
+    floatFrame.Draggable = true
+    floatFrame.Text = ""
+    floatFrame.Font = Enum.Font.SourceSans
+    floatFrame.TextSize = 1
+    Instance.new("UICorner", floatFrame).CornerRadius = UDim.new(0, 15)
+    local floatStroke = Instance.new("UIStroke", floatFrame)
+    floatStroke.Thickness = 1.5
+    floatStroke.Color = Color3.fromRGB(255, 100, 100)
+    local floatLabel = Instance.new("TextLabel", floatFrame)
+    floatLabel.Size = UDim2.new(1, 0, 1, 0)
+    floatLabel.BackgroundTransparency = 1
+    floatLabel.Font = Enum.Font.SourceSansBold
+    floatLabel.TextSize = 14
+    floatLabel.TextColor3 = Color3.new(1, 1, 1)
+    floatLabel.Text = "RKT 脚本运行中"
+    floatLabel.TextXAlignment = Enum.TextXAlignment.Center
+
+    floatFrame.MouseButton1Click:Connect(function() mainFrame.Visible = true; floatFrame.Visible = false end)
+    minimizeBtn.MouseButton1Click:Connect(function() mainFrame.Visible = false; floatFrame.Visible = true end)
+    closeBtn.MouseButton1Click:Connect(function() screenGui:Destroy() end)
+
+    RunService.Heartbeat:Connect(function()
+        local hue = (tick() * 0.5) % 1; local color = Color3.fromHSV(hue, 1, 1)
+        mainStroke.Color = color; if floatStroke and floatStroke.Parent then floatStroke.Color = color end
+    end)
+
+    UserInputService.InputBegan:Connect(function(inp, gp)
+        if gp then return end
+        if inp.KeyCode == Enum.KeyCode.RightShift then
+            mainFrame.Visible = not mainFrame.Visible; floatFrame.Visible = not mainFrame.Visible
+        end
+    end)
+
+    if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then
+        local mobBtn = Instance.new("TextButton")
+        mobBtn.Size = UDim2.new(0, 50, 0, 50); mobBtn.Position = UDim2.new(0.95, -55, 0.05, 5)
+        mobBtn.BackgroundColor3 = Color3.fromRGB(40, 25, 25); mobBtn.BackgroundTransparency = 0.15
+        mobBtn.BorderSizePixel = 0; mobBtn.Text = "RKT"; mobBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+        mobBtn.TextSize = 16; mobBtn.Font = Enum.Font.SourceSansBold; mobBtn.Active = true; mobBtn.Draggable = true
+        mobBtn.Parent = CoreGui
+        Instance.new("UICorner", mobBtn).CornerRadius = UDim.new(0, 12)
+        local mbs = Instance.new("UIStroke", mobBtn); mbs.Color = Color3.fromRGB(255, 80, 80); mbs.Thickness = 1.5
+        mobBtn.MouseButton1Click:Connect(function() mainFrame.Visible = not mainFrame.Visible; floatFrame.Visible = not mainFrame.Visible end)
+    end
+end
+
+-- ===== 启动 =====
+createUI()
+customNotify("Rakoof Kill Test", "子弹瞬间命中 | 作者:英吉利超入", 3)
+
+RunService.Heartbeat:Connect(function()
+    if AutoEnabled then pcall(DoAttack) end
+end)
+
+LP.OnTeleport:Connect(function(s)
+    if s == Enum.TeleportState.Leaving then
+        pcall(function() local sg = CoreGui:FindFirstChild("RKTScriptUI"); if sg then sg:Destroy() end end)
+    end
+end)
