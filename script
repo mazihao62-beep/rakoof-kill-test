@@ -10,13 +10,13 @@ local CoreGui = game:GetService("CoreGui")
 local LP = Players.LocalPlayer
 
 -- ===== 核心配置 =====
-local CONFIG = { AttackInterval = 0.1 }
+local CONFIG = { AttackInterval = 0.05 }
 local AutoEnabled = false
 local lastAtk = 0
 
--- ★方案1: Hook __namecall 拦截所有反作弊远程事件
+-- ★Hook反作弊：拦截所有发往AntiCheat的FireServer
 local oldNamecall
-local function HookAntiCheatRemote()
+local function HookAC()
     if oldNamecall then return end
     local mt = getrawmetatable(game)
     if not mt then return end
@@ -24,44 +24,45 @@ local function HookAntiCheatRemote()
     setreadonly(mt, false)
     mt.__namecall = newcclosure(function(self, ...)
         local method = getnamecallmethod()
-        if method == "FireServer" then
-            local name = tostring(self)
-            if name:find("AntiCheat") or name:find("Kick") or name:find("Ban") then
-                return  -- 完全拦截，不发送到服务器
-            end
+        if method == "FireServer" and tostring(self):find("AntiCheat") then
+            return
         end
         return oldNamecall(self, ...)
     end)
     setreadonly(mt, true)
-    print("[RKT] 已Hook __namecall 拦截反作弊事件")
 end
 
--- ★方案2: 每帧修改武器脚本内部的反作弊计数器和冷却
-local function GetWeaponEnv(tool)
-    if not tool then return nil end
-    local handle = tool:FindFirstChild("Handle")
-    if not handle then return nil end
-    for _, child in ipairs(handle:GetChildren()) do
-        if child:IsA("LocalScript") then
-            local ok, closure = pcall(getscriptclosure, child)
-            if ok and closure then
-                local ok2, env = pcall(getfenv, closure)
-                if ok2 and env then return env end
-            end
-        end
-    end
-    return nil
-end
-
-local function BypassAntiCheat(tool)
+-- ★拿到武器Setting模块并修改参数（同参考脚本做法）
+local function ModifyGun(tool)
     if not tool then return end
-    local env = GetWeaponEnv(tool)
-    if env then
-        env.v_u_10 = tick() - 0.9  -- 冷却检查通过
-        env.v_u_11 = 0               -- 反作弊计数器清零
-        env.v_u_12 = 100000          -- 子弹速度
-        env.v_u_13 = 10000           -- 子弹射程
+    
+    -- 找Setting模块
+    local settingScript = tool:FindFirstChild("Setting")
+    if settingScript and settingScript:IsA("ModuleScript") then
+        local config = require(settingScript)
+        
+        -- 无限子弹
+        config.LimitedClipEnabled = false
+        config.AmmoPerClip = math.huge
+        config.MaxClip = math.huge
+        
+        -- 无扩散
+        config.Spread = 0
+        config.SpreadRedution = 0
+        
+        -- 无后座
+        config.CameraShakingEnabled = false
+        
+        -- 超高射速
+        config.FireRate = 0
+        config.Auto = true
+        config.BurstFireEnabled = false
+        config.DelayBeforeFiring = 0
+        config.DelayAfterFiring = 0
+        
+        return true
     end
+    return false
 end
 
 -- 获取武器
@@ -69,11 +70,11 @@ local function GetTool()
     local c = LP.Character
     if not c then return nil end
     local t = c:FindFirstChildOfClass("Tool")
-    if t and t:FindFirstChild("Handle") and t.Handle:FindFirstChild("WeaponRemoteEvent") then return t end
+    if t then return t end
     local bp = LP:FindFirstChild("Backpack")
     if bp then
         for _, v in ipairs(bp:GetChildren()) do
-            if v:IsA("Tool") and v:FindFirstChild("Handle") and v.Handle:FindFirstChild("WeaponRemoteEvent") then
+            if v:IsA("Tool") then
                 pcall(function() v.Parent = c end)
                 task.wait(0.1)
                 return v
@@ -95,7 +96,10 @@ local function FindEnemy()
         if o:IsA("Script") or o:IsA("LocalScript") then continue end
         if o:GetAttribute("Hittable") then
             local p = o:IsA("BasePart") and o or (o:IsA("Model") and o.PrimaryPart)
-            if p then local d = (p.Position - pos).Magnitude; if d < 500 and d < bestD then bestD = d; best = p; bestPos = p.Position end end
+            if p then
+                local d = (p.Position - pos).Magnitude
+                if d < 500 and d < bestD then bestD = d; best = p; bestPos = p.Position end
+            end
         end
     end
     return best, bestPos
@@ -107,13 +111,18 @@ local function DoAttack()
     local now = tick()
     if now - lastAtk < CONFIG.AttackInterval then return end
     lastAtk = now
-    BypassAntiCheat(tool)
+    
+    -- 修改武器参数（每次攻击前都执行，确保生效）
+    ModifyGun(tool)
+    
+    -- 发射子弹
     local target, targetPos = FindEnemy()
-    local remoteEv = tool.Handle:FindFirstChild("WeaponRemoteEvent")
-    if not remoteEv then return end
-    local c = LP.Character; local r = c and c:FindFirstChild("HumanoidRootPart")
-    if targetPos then pcall(function() remoteEv:FireServer(targetPos) end)
-    elseif r then pcall(function() remoteEv:FireServer(r.Position + r.CFrame.LookVector * 100) end) end
+    local remoteEv = tool:FindFirstChild("WeaponRemoteEvent", true)
+    if remoteEv and targetPos then
+        pcall(function() remoteEv:FireServer(targetPos) end)
+    end
+    
+    -- 触发原生攻击
     pcall(function() tool:Activate() end)
 end
 
@@ -286,9 +295,9 @@ local function createUI()
         end
     end)
 
-    local intervalSlider = createSlider("攻击间隔(秒)", 0.1, 0.5, CONFIG.AttackInterval, contentFrame)
+    local intervalSlider = createSlider("攻击间隔(秒)", 0.05, 0.5, CONFIG.AttackInterval, contentFrame)
     intervalSlider.Input.FocusLost:Connect(function()
-        local v = math.clamp(tonumber(intervalSlider.Input.Text) or CONFIG.AttackInterval, 0.1, 0.5)
+        local v = math.clamp(tonumber(intervalSlider.Input.Text) or CONFIG.AttackInterval, 0.05, 0.5)
         CONFIG.AttackInterval = v; intervalSlider.SetValue(v)
         if AutoEnabled then autoToggle.Text = "⚔ 自动攻击（开启 " .. v .. "s）" end
     end)
@@ -348,10 +357,9 @@ local function createUI()
 end
 
 -- ===== 启动 =====
--- 双重反作弊绕过
-HookAntiCheatRemote()  -- 方案1: 拦截远程事件
+HookAC()  -- 反作弊拦截
 createUI()
-customNotify("Rakoof Kill Test", "双重反作弊绕过 | 作者:英吉利超入", 3)
+customNotify("Rakoof Kill Test", "Setting模块修改 + 反作弊绕过 | 作者:英吉利超入", 3)
 
 RunService.Heartbeat:Connect(function()
     if AutoEnabled then pcall(DoAttack) end
