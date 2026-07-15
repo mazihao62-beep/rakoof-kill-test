@@ -14,111 +14,95 @@ local CONFIG = { AttackInterval = 0.05 }
 local CachedTool = nil
 local AutoEnabled = false
 local lastAtk = 0
-local WeaponScript = nil
+
+-- ★修复：检查Handle下是否有WeaponRemoteEvent，不是检查Tool
+local function IsRemoteWeapon(tool)
+    if not tool then return false end
+    local handle = tool:FindFirstChild("Handle")
+    if not handle then return false end
+    local ev = handle:FindFirstChild("WeaponRemoteEvent")
+    return ev ~= nil
+end
 
 local function GetTool()
     local c = LP.Character
-    if not c then CachedTool = nil; WeaponScript = nil; return nil end
-    if CachedTool and CachedTool.Parent == c and CachedTool:FindFirstChild("WeaponRemoteEvent") then return CachedTool end
+    if not c then CachedTool = nil; return nil end
+    if CachedTool and CachedTool.Parent == c and IsRemoteWeapon(CachedTool) then return CachedTool end
     local t = c:FindFirstChildOfClass("Tool")
-    if t and t:FindFirstChild("WeaponRemoteEvent") then CachedTool = t; return t end
+    if t and IsRemoteWeapon(t) then CachedTool = t; return t end
     local bp = LP:FindFirstChild("Backpack")
     if bp then
         for _, v in ipairs(bp:GetChildren()) do
-            if v:IsA("Tool") and v:FindFirstChild("WeaponRemoteEvent") then
+            if v:IsA("Tool") and IsRemoteWeapon(v) then
                 pcall(function() v.Parent = c end)
                 task.wait(0.1)
                 CachedTool = v; return v
             end
         end
     end
-    CachedTool = nil; WeaponScript = nil; return nil
+    CachedTool = nil; return nil
 end
 
--- 找到武器脚本
+-- ★修复：从Handle下获取WeaponRemoteEvent
+local function GetRemoteEvent(tool)
+    if not tool then return nil end
+    local handle = tool:FindFirstChild("Handle")
+    if not handle then return nil end
+    return handle:FindFirstChild("WeaponRemoteEvent")
+end
+
+-- 找到武器脚本（Handle下）
 local function FindWeaponScript(tool)
     if not tool then return nil end
-    if WeaponScript and WeaponScript.Parent and WeaponScript.Parent.Parent == tool then return WeaponScript end
     local handle = tool:FindFirstChild("Handle")
-    if handle then
-        for _, child in ipairs(handle:GetChildren()) do
-            if child:IsA("LocalScript") then WeaponScript = child; return child end
-        end
+    if not handle then return nil end
+    for _, child in ipairs(handle:GetChildren()) do
+        if child:IsA("LocalScript") then return child end
     end
-    WeaponScript = nil; return nil
+    return nil
 end
 
--- 修改子弹参数
+-- 修改子弹参数（修改Handle属性）
 local function InstantBullet(tool)
     if not tool then return end
     local handle = tool:FindFirstChild("Handle")
-    if handle then
-        pcall(function() handle:SetAttribute("BulletSpeed", 100000) end)
-        pcall(function() handle:SetAttribute("BulletRange", 10000) end)
-        pcall(function() handle:SetAttribute("BaseCooldown", 0.01) end)
-    end
+    if not handle then return end
+    -- 修改Handle属性
+    pcall(function() handle:SetAttribute("BulletSpeed", 100000) end)
+    pcall(function() handle:SetAttribute("BulletRange", 10000) end)
+    pcall(function() handle:SetAttribute("BaseCooldown", 0.01) end)
+    -- Hook脚本环境
     local script = FindWeaponScript(tool)
     if not script then return end
     local ok, closure = pcall(getscriptclosure, script)
     if ok and closure then
         local ok2, env = pcall(getfenv, closure)
         if ok2 and env then
-            env.v_u_10 = 0
-            env.v_u_7 = 0
-            env.v_u_12 = 100000
-            env.v_u_13 = 10000
-        end
-    end
-    local ok3, upvals = pcall(getupvalues, script)
-    if ok3 and upvals then
-        for i, uv in ipairs(upvals) do
-            if type(uv) == "number" then
-                if uv > 0 and uv <= 5 then pcall(setupvalue, script, i, 0)
-                elseif uv > 50 and uv <= 5000 then pcall(setupvalue, script, i, 100000) end
-            end
+            env.v_u_10 = 0; env.v_u_7 = 0; env.v_u_12 = 100000; env.v_u_13 = 10000
         end
     end
 end
 
--- ★调试版：打印找到的目标
-local debugCount = 0
+-- 寻找敌人
 local function FindEnemy()
     local c = LP.Character
     if not c then return nil, nil end
     local r = c:FindFirstChild("HumanoidRootPart")
     if not r then return nil, nil end
-    local pos = r.Position
-    local bestPart, bestPos, bestD = nil, nil, math.huge
-    local found = 0
+    local pos = r.Position; local best, bestPos, bestD = nil, nil, math.huge
     for _, o in ipairs(Workspace:GetDescendants()) do
         if o:IsA("Script") or o:IsA("LocalScript") then continue end
-        local hittable = o:GetAttribute("Hittable")
-        if hittable then
-            found = found + 1
+        if o:GetAttribute("Hittable") then
             local p = o:IsA("BasePart") and o or (o:IsA("Model") and o.PrimaryPart)
-            if p then
-                local d = (p.Position - pos).Magnitude
-                if d < 500 and d < bestD then
-                    bestD = d; bestPart = p; bestPos = p.Position
-                end
-            end
+            if p then local d = (p.Position - pos).Magnitude; if d < 500 and d < bestD then bestD = d; best = p; bestPos = p.Position end end
         end
     end
-    -- 每3秒打印一次调试信息
-    debugCount = debugCount + 1
-    if debugCount % 180 == 0 then
-        print("[RKT 调试] 找到 Hittable 对象数量:", found)
-        print("[RKT 调试] 最佳目标:", bestPart and bestPart:GetFullName() or "无")
-        print("[RKT 调试] 最佳距离:", bestD)
-    end
-    return bestPart, bestPos
+    return best, bestPos
 end
 
 local function DoAttack()
     local tool = GetTool()
-    if not tool then
-        if debugCount % 180 == 0 then print("[RKT 调试] 未装备远程武器") end
-        return end
+    if not tool then return end
     local now = tick()
     if now - lastAtk < CONFIG.AttackInterval then return end
     lastAtk = now
@@ -126,20 +110,15 @@ local function DoAttack()
     InstantBullet(tool)
 
     local target, targetPos = FindEnemy()
-    local remoteEv = tool:FindFirstChild("WeaponRemoteEvent")
-    if not remoteEv then
-        if debugCount % 180 == 0 then print("[RKT 调试] 武器没有 WeaponRemoteEvent") end
-        return end
+    local remoteEv = GetRemoteEvent(tool)
+    if not remoteEv then return end
 
-    local c = LP.Character
-    local r = c and c:FindFirstChild("HumanoidRootPart")
+    local c = LP.Character; local r = c and c:FindFirstChild("HumanoidRootPart")
 
     if targetPos then
         pcall(function() remoteEv:FireServer(targetPos) end)
-        if debugCount % 180 == 0 then print("[RKT 调试] 发射子弹到:", targetPos) end
     elseif r then
         pcall(function() remoteEv:FireServer(r.Position + r.CFrame.LookVector * 100) end)
-        if debugCount % 180 == 0 then print("[RKT 调试] 无目标，朝前方发射") end
     end
 
     pcall(function() tool:Activate() end)
@@ -321,7 +300,6 @@ local function createUI()
         if AutoEnabled then autoToggle.Text = "⚔ 自动攻击（开启 " .. v .. "s）" end
     end)
 
-    -- 悬浮窗
     local floatFrame = Instance.new("TextButton", screenGui)
     floatFrame.Size = UDim2.new(0, 200, 0, 30)
     floatFrame.Position = UDim2.new(0.5, -100, 0, 10)
@@ -378,7 +356,7 @@ end
 
 -- ===== 启动 =====
 createUI()
-customNotify("Rakoof Kill Test", "调试模式 | 查看控制台输出 | 作者:英吉利超入", 3)
+customNotify("Rakoof Kill Test", "已修复远程武器检测 | 作者:英吉利超入", 3)
 
 RunService.Heartbeat:Connect(function()
     if AutoEnabled then pcall(DoAttack) end
